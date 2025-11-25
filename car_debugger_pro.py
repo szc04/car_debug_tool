@@ -7,14 +7,20 @@ import json
 import serial
 from adbutils import adb
 import subprocess
-import queue  # ← 新增：用于线程间通信
+import queue  # 用于线程间通信
 
 
 class CarDebuggerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("车机自动化调试工具 - Windows命令版 v1.0")
-        self.root.geometry("1300x900")
+        self.root.title("车机自动化调试工具 - Windows命令版 v1.1")
+        # 获取屏幕的高度
+        screen_height = self.root.winfo_screenheight()
+
+        # 设置窗口大小为 1300 像素宽，屏幕高度像素高
+        # 注意：高度可以适当减小一点（比如减 50），以防任务栏被遮挡
+        app_height = screen_height - 50 
+        self.root.geometry(f"1300x{app_height}")
 
         self.serial_conn = None
         self.serial_thread = None
@@ -23,9 +29,9 @@ class CarDebuggerApp:
         self.adb_log_path = "adb.log"
         self.config_file = "debugger_config.json"
 
-        # === 新增：线程安全队列 ===
+        # 线程安全队列
         self.serial_queue = queue.Queue()  # 串口数据队列
-        self.adb_queue = queue.Queue()     # ADB 日志队列（可选增强）
+        self.adb_queue = queue.Queue()     # ADB 日志队列
 
         # 加载配置
         self.config = self.load_config()
@@ -94,7 +100,7 @@ class CarDebuggerApp:
         self.adb_lines = []
 
     def create_ui(self):
-        # === 顶部：双日志窗口（横向并列）===
+        # 顶部：双日志窗口（横向并列）
         log_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         log_pane.pack(fill="x", padx=10, pady=(10, 5))
 
@@ -110,7 +116,7 @@ class CarDebuggerApp:
         self.adb_log.pack(fill="both", expand=True)
         log_pane.add(adb_frame, weight=1)
 
-        # === 中间：双列步骤布局 ===
+        # 中间：双列步骤布局
         main_pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_pane.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -150,10 +156,11 @@ class CarDebuggerApp:
         self.create_step_in_column(right_frame, 6, "执行 ADB 命令窗口（支持Windows命令）",
             [],
             self.config["step6_cmd"],
-            self.run_step6)
+            self.run_step6,
+            height=10)
         main_pane.add(right_frame, weight=1)
 
-        # === 启动时自动连接 ===
+        # 启动时自动连接
         self.root.after(100, self.auto_connect)
 
     def auto_connect(self):
@@ -203,7 +210,7 @@ class CarDebuggerApp:
 
         cmd_label = ttk.Label(frame, text="命令区域（每行一条命令）:")
         cmd_label.pack(anchor="w", pady=(10, 2))
-        cmd_text = scrolledtext.ScrolledText(frame, height=5, wrap=tk.WORD)
+        cmd_text = scrolledtext.ScrolledText(frame, height=10, wrap=tk.WORD)
         cmd_text.insert("1.0", placeholder.strip())
         cmd_text.pack(fill="x", pady=(0, 10))
 
@@ -266,10 +273,8 @@ class CarDebuggerApp:
         if path:
             entry.delete(0, tk.END)
             entry.insert(0, path)
-            if hasattr(self, 'entries_step3'):
-                pass  # 可忽略，配置在 save_config 中处理
 
-    # ================== 安全的日志更新方法 ==================
+    # 安全的日志更新方法
     def log_serial(self, msg):
         """仅由主线程调用！"""
         self.serial_lines.append(msg)
@@ -293,7 +298,7 @@ class CarDebuggerApp:
         except:
             pass
 
-    # ================== 队列检查循环（主线程）==================
+    # 队列检查循环（主线程）
     def check_serial_queue(self):
         """主线程定期检查串口队列"""
         try:
@@ -318,7 +323,7 @@ class CarDebuggerApp:
         t = threading.Thread(target=func, daemon=True)
         t.start()
 
-    # ================== 实时串口日志监控（线程安全）==================
+    # 实时串口日志监控（线程安全）
     def start_serial_monitor(self):
         if self.serial_conn and not self.serial_running:
             self.serial_running = True
@@ -329,20 +334,50 @@ class CarDebuggerApp:
         self.serial_running = False
 
     def _monitor_serial(self):
+        """改进的串口监控线程，增加超时和状态检查"""
         buffer = ""
         while self.serial_running and self.serial_conn and self.serial_conn.is_open:
             try:
+                # 非阻塞检查，避免设备重启时阻塞
                 if self.serial_conn.in_waiting > 0:
                     data = self.serial_conn.read(self.serial_conn.in_waiting).decode('utf-8', errors='ignore')
                     buffer += data
                     lines = buffer.split('\n')
                     buffer = lines[-1]
                     for line in lines[:-1]:
-                        self.serial_queue.put(line)  # ← 安全放入队列
-                time.sleep(0.01)
-            except:
+                        self.serial_queue.put(line)
+                # 短暂休眠，降低CPU占用并允许线程响应退出信号
+                time.sleep(0.05)
+            except serial.SerialException as e:
+                self.serial_queue.put(f"[⚠] 串口通信错误: {e}")
+                # 设备可能已断开，尝试重新连接
+                self._reconnect_serial()
                 break
+            except Exception as e:
+                self.serial_queue.put(f"[⚠] 监控错误: {e}")
+                time.sleep(1)  # 出错后稍等再继续
         self.serial_running = False
+
+    def _reconnect_serial(self):
+        """串口断开后的重连逻辑"""
+        if not self.serial_running:
+            return
+            
+        self.serial_queue.put("[ℹ] 尝试重新连接串口...")
+        try:
+            if self.serial_conn and self.serial_conn.is_open:
+                self.serial_conn.close()
+                
+            # 使用当前配置重新连接
+            port = self.config["serial_port"]
+            baud = int(self.config["serial_baud"])
+            self.serial_conn = serial.Serial(port, baud, timeout=1)
+            self.serial_queue.put(f"[✓] 重新连接串口 {port} @ {baud} 成功")
+            self.start_serial_monitor()
+        except Exception as e:
+            self.serial_queue.put(f"[✗] 重新连接失败: {e}")
+            # 5秒后再次尝试
+            threading.Timer(5, self._reconnect_serial).start()
 
     def send_interrupt_to_serial(self):
         if self.serial_conn and self.serial_conn.is_open:
@@ -351,7 +386,7 @@ class CarDebuggerApp:
         else:
             self.serial_queue.put("[✗] 串口未连接，无法发送中断")
 
-    # ================== 步骤逻辑（ADB部分也使用队列）==================
+    # 步骤逻辑（ADB部分也使用队列）
     def run_step1(self, entries, cmd_text):
         port = entries[0].get().strip()
         baud = int(entries[1].get().strip())
@@ -377,11 +412,17 @@ class CarDebuggerApp:
             if not cmd or cmd.startswith("#"): continue
             try:
                 self.serial_conn.write((cmd + "\n").encode())
-                time.sleep(0.5)
-                out = self.serial_conn.read_all().decode(errors='ignore').strip()
+                # 使用分段读取代替一次性读取，避免长时间阻塞
+                start_time = time.time()
+                response = ""
+                while time.time() - start_time < 2:  # 2秒超时
+                    if self.serial_conn.in_waiting > 0:
+                        response += self.serial_conn.read(self.serial_conn.in_waiting).decode(errors='ignore')
+                    time.sleep(0.1)
+                    
                 self.serial_queue.put(f"$ {cmd}")
-                if out:
-                    self.serial_queue.put(out)
+                if response.strip():
+                    self.serial_queue.put(response.strip())
             except Exception as e:
                 self.serial_queue.put(f"[✗] 串口命令 '{cmd}' 失败: {e}")
 
@@ -394,7 +435,7 @@ class CarDebuggerApp:
                 if not cmd or cmd.startswith("#"): continue
                 
                 if cmd.startswith("adb "):
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
                     self.adb_queue.put(f"[ADB TOOL] {cmd}")
                     self.adb_queue.put(result.stdout + result.stderr)
                 else:
@@ -435,6 +476,8 @@ class CarDebuggerApp:
             try:
                 d.shell(cmd)
                 self.adb_queue.put(f"$ {cmd} → 已发送")
+                # 重启命令后短暂休眠，避免连续发送
+                time.sleep(1)
             except Exception as e:
                 self.adb_queue.put(f"[✗] 重启命令 '{cmd}' 失败: {e}")
 
@@ -449,11 +492,17 @@ class CarDebuggerApp:
             if not cmd or cmd.startswith("#"): continue
             try:
                 self.serial_conn.write((cmd + "\n").encode())
-                time.sleep(1)
-                out = self.serial_conn.read_all().decode(errors='ignore').strip()
+                # 带超时的响应读取
+                start_time = time.time()
+                response = ""
+                while time.time() - start_time < 2:  # 2秒超时
+                    if self.serial_conn.in_waiting > 0:
+                        response += self.serial_conn.read(self.serial_conn.in_waiting).decode(errors='ignore')
+                    time.sleep(0.1)
+                    
                 self.serial_queue.put(f"$ {cmd}")
-                if out:
-                    self.serial_queue.put(out)
+                if response.strip():
+                    self.serial_queue.put(response.strip())
             except Exception as e:
                 self.serial_queue.put(f"[✗] 串口命令失败: {e}")
 
@@ -468,11 +517,17 @@ class CarDebuggerApp:
             if not cmd or cmd.startswith("#"): continue
             try:
                 self.serial_conn.write((cmd + "\n").encode())
-                time.sleep(1)
-                out = self.serial_conn.read_all().decode(errors='ignore').strip()
+                # 带超时的响应读取
+                start_time = time.time()
+                response = ""
+                while time.time() - start_time < 2:  # 2秒超时
+                    if self.serial_conn.in_waiting > 0:
+                        response += self.serial_conn.read(self.serial_conn.in_waiting).decode(errors='ignore')
+                    time.sleep(0.1)
+                    
                 self.serial_queue.put(f"$ {cmd}")
-                if out:
-                    self.serial_queue.put(out)
+                if response.strip():
+                    self.serial_queue.put(response.strip())
             except Exception as e:
                 self.serial_queue.put(f"[✗] 串口命令失败: {e}")
 
@@ -485,7 +540,7 @@ class CarDebuggerApp:
                 if not cmd or cmd.startswith("#"): continue
                 
                 if cmd.startswith("adb "):
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
                     self.adb_queue.put(f"[ADB TOOL] {cmd}")
                     self.adb_queue.put(result.stdout + result.stderr)
                 else:
